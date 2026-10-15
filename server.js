@@ -8,7 +8,10 @@
  *   4. 首次使用即核销（默认 maxUses=1），转发给别人会提示「已被使用」
  *
  * 运行：node server.js        默认 http://localhost:8787
- * 环境变量：PORT / ADMIN_TOKEN / DATA_DIR
+ * 环境变量：PORT / ISSUE_TOKEN / DATA_DIR / PUBLIC_URL（对外 base，用于生成兑换短链）
+ *          / ADMIN_PASSWORD（可选，覆盖下面的管理密码常量）
+ * 说明：管理后台（/admin 及 /api/admin/*）公网可访问，需**密码登录**（见 ADMIN_PASSWORD）；
+ *       仅 /api/issue（自动发货调用）需配 ISSUE_TOKEN。
  */
 'use strict';
 
@@ -31,7 +34,6 @@ const HOST = process.env.HOST || '0.0.0.0';
 
 const CODES_FILE = path.join(DATA_DIR, 'codes.json');
 const SECRET_FILE = path.join(DATA_DIR, 'secret.key');
-const ADMIN_TOKEN_FILE = path.join(DATA_DIR, 'admin.token');
 const TESTS_FILE = path.join(CONFIG_DIR, 'tests.json');
 
 // 授权码字符集：剔除容易看错的 0/O/1/I/L/2/Z/5/S/B
@@ -76,20 +78,53 @@ function getSecret() {
 }
 const SECRET = getSecret();
 
-function getAdminToken() {
-  if (process.env.ADMIN_TOKEN) return process.env.ADMIN_TOKEN;
-  ensureDir(DATA_DIR);
-  if (fs.existsSync(ADMIN_TOKEN_FILE)) {
-    return fs.readFileSync(ADMIN_TOKEN_FILE, 'utf8').trim();
-  }
-  const t = crypto.randomBytes(12).toString('hex');
-  fs.writeFileSync(ADMIN_TOKEN_FILE, t, 'utf8');
-  return t;
-}
-const ADMIN_TOKEN = getAdminToken();
 // 即时签发令牌：供自动发货工具（阿奇索接口发货）在下单后调用本服务现场生成码。
-// 默认复用 ADMIN_TOKEN；公网部署建议单独用 ISSUE_TOKEN 环境变量覆盖。
-const ISSUE_TOKEN = process.env.ISSUE_TOKEN || ADMIN_TOKEN;
+// 仅 /api/issue 使用，且只在公网访问时需要；本机直连免令牌。
+// 未设置则公网签发被锁定（返回 401），避免「谁都能刷码」。
+const ISSUE_TOKEN = process.env.ISSUE_TOKEN || '';
+
+// ------------------------------------------------------------------
+// 管理后台登录（密码常量 + 签名会话 Cookie）
+// ------------------------------------------------------------------
+// 密码直接写死在服务端常量里（可被环境变量覆盖）。改这里即可换密码，旧会话立即失效。
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'jy120218';
+const ADMIN_COOKIE = 'admin_session';
+const ADMIN_SESSION_AGE = 7 * 24 * 60 * 60; // 登录后 7 天内免重复输入
+
+// 会话签名密钥由密码派生：同一份代码在任何实例上一致，不依赖 data/ 目录，也免疫重新部署
+const ADMIN_KEY = crypto.createHash('sha256').update('admin-session:' + ADMIN_PASSWORD).digest();
+
+function signAdminSession() {
+  const body = b64url(JSON.stringify({ a: 'admin', e: Date.now() + ADMIN_SESSION_AGE * 1000 }));
+  const sig = crypto.createHmac('sha256', ADMIN_KEY).update(body).digest('base64url');
+  return `${body}.${sig}`;
+}
+
+function isAdmin(req) {
+  const token = parseCookies(req)[ADMIN_COOKIE];
+  if (!token) return false;
+  const i = token.lastIndexOf('.');
+  if (i <= 0) return false;
+  const body = token.slice(0, i);
+  const sig = token.slice(i + 1);
+  const expect = crypto.createHmac('sha256', ADMIN_KEY).update(body).digest('base64url');
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expect);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
+  try {
+    const p = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    return p && p.a === 'admin' && p.e > Date.now();
+  } catch (e) {
+    return false;
+  }
+}
+
+// 恒定时间比较密码（避免按字符比较泄漏时序）
+function passwordOk(input) {
+  const a = crypto.createHash('sha256').update(String(input || '')).digest();
+  const b = crypto.createHash('sha256').update(ADMIN_PASSWORD).digest();
+  return crypto.timingSafeEqual(a, b);
+}
 
 // ------------------------------------------------------------------
 // 数据层：授权码库（内存缓存 + 原子落盘）
@@ -198,6 +233,15 @@ function authorizedFor(req, testId) {
   return p.t === testId;
 }
 
+// 「同一个浏览器在用同一张码」判定。
+// 签发 Cookie 时把码的哈希存进了 c 字段，所以这里能确认：这枚有效 Cookie 就是
+// 用这张码、在这个测试上签发的 —— 是本人在返回上一页 / 重复点开链接，而不是转发给了别人。
+// 用途：这种重复进入不再消耗使用次数（一次性码用完后，买家一按返回就卡在「已被使用」）。
+function isSameDeviceCode(req, testId, code) {
+  const p = unsign(parseCookies(req)[COOKIE_NAME]);
+  return !!(p && p.e > Date.now() && p.t === testId && p.c === sha256(code));
+}
+
 // 判断请求是否来自本机直连（用于本地免令牌管理）
 // 经过公网代理（带 X-Forwarded-For）一律视为远程，必须令牌。
 function isLocalRequest(req) {
@@ -205,6 +249,13 @@ function isLocalRequest(req) {
   if (xff) return false; // 有代理头 = 公网，需要令牌
   const remote = (req.socket && req.socket.remoteAddress) || '';
   return remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+}
+
+// 管理接口需登录态（密码登录后签发的签名 Cookie）。
+function requireAdmin(req, res) {
+  if (isAdmin(req)) return true;
+  sendJson(res, 401, { ok: false, message: '未登录或登录已失效' });
+  return false;
 }
 
 // ------------------------------------------------------------------
@@ -318,8 +369,11 @@ async function handleVerify(req, res, body) {
       testId: rec.testId
     });
   }
+  // 同机复用：这一枚有效 Cookie 就是本码在本测试上签发的 → 是买家自己回来，不消耗次数。
+  const reentry = isSameDeviceCode(req, testId, code);
+
   const st = codeStatus(rec);
-  if (st === 'exhausted') {
+  if (st === 'exhausted' && !reentry) {
     return sendJson(res, 200, {
       ok: false,
       reason: 'exhausted',
@@ -328,17 +382,21 @@ async function handleVerify(req, res, body) {
     });
   }
 
-  // 通过：核销 + 发 Cookie
-  rec.usedCount = (rec.usedCount || 0) + 1;
-  if (!rec.firstUsedAt) rec.firstUsedAt = new Date().toISOString();
-  rec.lastUsedAt = new Date().toISOString();
-  dirty = true;
-  saveCodes();
+  // 通过：核销 + 发 Cookie（同机复用只刷新 Cookie，不重复计数）
+  if (!reentry) {
+    rec.usedCount = (rec.usedCount || 0) + 1;
+    if (!rec.firstUsedAt) rec.firstUsedAt = new Date().toISOString();
+    rec.lastUsedAt = new Date().toISOString();
+    dirty = true;
+    saveCodes();
+  }
 
   issueCookies(res, testId, code, rec.note);
+  if (reentry) log(`同机复用放行 尾号${String(code).slice(-4)} → ${testId}`);
 
   return sendJson(res, 200, {
     ok: true,
+    reentry,
     redirect: `/tests/${testId}`,
     testId,
     testName: test.name,
@@ -350,11 +408,46 @@ async function handleVerify(req, res, body) {
 // ------------------------------------------------------------------
 // 管理 API
 // ------------------------------------------------------------------
-function checkAdmin(req, body) {
-  if (isLocalRequest(req)) return true; // 本机直连免令牌（公网访问仍必须带令牌）
-  const h = req.headers['x-admin-token'] || '';
-  const b = body && body.token ? String(body.token) : '';
-  return (h && h === ADMIN_TOKEN) || (b && b === ADMIN_TOKEN);
+function checkAdmin(req) {
+  // 路由层已用 requireAdmin 拦住未登录请求，这里再做一次兜底。
+  return isAdmin(req);
+}
+
+// 登录限流：同一来源 10 分钟内错 8 次即锁定，防止公网爆破
+const loginFails = new Map(); // ip -> { n, t }
+const LOGIN_MAX_FAILS = 8;
+const LOGIN_WINDOW_MS = 10 * 60 * 1000;
+
+function clientIp(req) {
+  const xff = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return xff || (req.socket && req.socket.remoteAddress) || 'unknown';
+}
+
+async function handleAdminLogin(req, res, body) {
+  const ip = clientIp(req);
+  const rec = loginFails.get(ip);
+  const fresh = rec && Date.now() - rec.t < LOGIN_WINDOW_MS ? rec : null;
+  if (fresh && fresh.n >= LOGIN_MAX_FAILS) {
+    return sendJson(res, 429, { ok: false, message: '密码错误次数过多，请 10 分钟后再试' });
+  }
+  if (!passwordOk(body.password)) {
+    const n = fresh ? fresh.n + 1 : 1;
+    loginFails.set(ip, { n, t: Date.now() });
+    log(`管理登录失败 ip=${ip}（第 ${n} 次）`);
+    return sendJson(res, 401, { ok: false, message: '密码不正确' });
+  }
+  loginFails.delete(ip);
+  res.setHeader(
+    'Set-Cookie',
+    `${ADMIN_COOKIE}=${signAdminSession()}; Path=/; Max-Age=${ADMIN_SESSION_AGE}; SameSite=Lax; HttpOnly`
+  );
+  log(`管理登录成功 ip=${ip}`);
+  return sendJson(res, 200, { ok: true, message: '登录成功' });
+}
+
+function handleAdminLogout(req, res) {
+  res.setHeader('Set-Cookie', `${ADMIN_COOKIE}=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly`);
+  return sendJson(res, 200, { ok: true, message: '已退出登录' });
 }
 
 // 即时签发校验：本机直连免令牌；公网需带 x-issue-token（= ISSUE_TOKEN）
@@ -414,6 +507,8 @@ async function handleIssue(req, res, body) {
   const note = String(body.note || '').slice(0, 60);
   const host = req.headers['x-forwarded-host'] || req.headers.host || `localhost:${PORT}`;
   const proto = String(req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim() || 'https';
+  // 对外 base：反向代理不透传原始域名时（Host 变成沙箱内部名），用 PUBLIC_URL 指定公网域名
+  const base = process.env.PUBLIC_URL ? process.env.PUBLIC_URL.replace(/\/+$/, '') : `${proto}://${host}`;
 
   const out = [];
   for (let i = 0; i < count; i++) {
@@ -425,8 +520,8 @@ async function handleIssue(req, res, body) {
     // 指定测试：直接给「一键进测试」的直链（买家点一下即核销进入，零输入）
     // 通用码(*)：给 /go 短链（壳页带码，让用户自选测试）
     const direct = testId === '*'
-      ? `${proto}://${host}/go?code=${encodeURIComponent(c)}&test=*`
-      : `${proto}://${host}/tests/${encodeURIComponent(testId)}.html?c=${encodeURIComponent(c)}`;
+      ? `${base}/go?code=${encodeURIComponent(c)}&test=*`
+      : `${base}/tests/${encodeURIComponent(testId)}.html?c=${encodeURIComponent(c)}`;
     out.push({ code: c, redeemUrl: direct });
   }
   dirty = true;
@@ -436,10 +531,6 @@ async function handleIssue(req, res, body) {
 }
 
 function handleAdminList(req, res, url) {
-  if (!isLocalRequest(req)) {
-    const token = url.searchParams.get('token') || req.headers['x-admin-token'] || '';
-    if (token !== ADMIN_TOKEN) return sendJson(res, 401, { ok: false, message: '管理令牌不正确' });
-  }
   const filter = url.searchParams.get('test') || '';
   const rows = Object.values(codes)
     .filter((r) => !filter || r.testId === filter)
@@ -500,12 +591,20 @@ const server = http.createServer(async (req, res) => {
       return handleVerify(req, res, body);
     }
 
-    // 管理 API
+    // 管理登录 / 退出（公开：登录动作本身不能要求已登录）
+    if (p === '/api/admin/login' && req.method === 'POST') {
+      const body = await readBody(req);
+      return handleAdminLogin(req, res, body);
+    }
+    if (p === '/api/admin/logout' && req.method === 'POST') {
+      return handleAdminLogout(req, res);
+    }
+
+    // 其余管理 API：需要密码登录后的会话 Cookie
+    if (p.startsWith('/api/admin/')) {
+      if (!requireAdmin(req, res)) return;
+    }
     if (p === '/api/admin/tests') {
-      if (!isLocalRequest(req)) {
-        const token = url.searchParams.get('token') || req.headers['x-admin-token'] || '';
-        if (token !== ADMIN_TOKEN) return sendJson(res, 401, { ok: false, message: '管理令牌不正确' });
-      }
       const tests = loadTests().map((t) => ({
         id: t.id, name: t.name, subtitle: t.subtitle || '', price: t.price || 0, status: t.status || 'offline'
       }));
@@ -531,6 +630,7 @@ const server = http.createServer(async (req, res) => {
       return serveStatic(res, path.join(PUBLIC_DIR, 'index.html'));
     }
     if (p === '/admin' || p === '/admin.html') {
+      // 页面本身公开（只是登录框），列表/生成等数据接口一律要求登录态
       return serveStatic(res, path.join(PUBLIC_DIR, 'admin.html'));
     }
     if (p === '/gate-client.js') {
@@ -560,14 +660,21 @@ const server = http.createServer(async (req, res) => {
       if (c) {
         const rec = codes[c];
         const st = codeStatus(rec);
+        const online = test && test.status === 'online';
         const okRec = rec && !rec.revoked && st !== 'exhausted' &&
-          (rec.testId === '*' || rec.testId === testId) && test && test.status === 'online';
+          (rec.testId === '*' || rec.testId === testId) && online;
         if (okRec) {
           rec.usedCount = (rec.usedCount || 0) + 1;
           if (!rec.firstUsedAt) rec.firstUsedAt = new Date().toISOString();
           rec.lastUsedAt = new Date().toISOString();
           dirty = true; saveCodes();
           issueCookies(res, testId, c, rec.note);
+          return serveStatic(res, path.join(PUBLIC_DIR, 'tests', test.file));
+        }
+        // 码已用光，但本机 Cookie 就是它签发的 → 买家重复点开同一条链接，直接放行
+        if (rec && !rec.revoked && online && isSameDeviceCode(req, testId, c)) {
+          issueCookies(res, testId, c, rec.note);
+          log(`同机复用放行 尾号${String(c).slice(-4)} → ${testId}`);
           return serveStatic(res, path.join(PUBLIC_DIR, 'tests', test.file));
         }
         const reason = !rec ? 'not_found' : rec.revoked ? 'revoked'
@@ -606,7 +713,11 @@ server.listen(PORT, HOST, () => {
   log('==========================================');
   log('  测评授权码系统已启动');
   log(`  入口页  http://localhost:${PORT}/`);
-  log(`  管理页  http://localhost:${PORT}/admin`);
-  log(`  管理令牌 ${ADMIN_TOKEN}`);
+  log(`  管理页  http://localhost:${PORT}/admin  （密码登录；公网同一入口）`);
+  if (ISSUE_TOKEN) {
+    log('  发货签发令牌(ISSUE_TOKEN) 已设置 → 公网自动发货可用');
+  } else {
+    log('  发货签发令牌未设置 → /api/issue 仅本机可用；公网发货请先设 ISSUE_TOKEN');
+  }
   log('==========================================');
 });
