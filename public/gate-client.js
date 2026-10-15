@@ -20,31 +20,56 @@
     return m ? decodeURIComponent(m[1]) : '';
   }
 
+  // base64url → 对象。两个坑：
+  //   1) 服务端用 base64url 编码，结尾的 = 填充被去掉了，直接丢给 atob 会抛异常；
+  //   2) atob 返回的是按 Latin-1 解读的串，里面的中文（UTF-8 字节）会变成乱码，
+  //      所以要再按 UTF-8 解一遍，否则备注会显示成「ä¹°å®¶å¼ ä¸」这种。
+  function decodeDisplay(raw) {
+    if (!raw) return null;
+    try {
+      var s = String(raw).replace(/-/g, '+').replace(/_/g, '/');
+      var pad = s.length % 4;
+      if (pad) s += '===='.slice(pad);
+      var bin = atob(s);
+      var pct = '';
+      for (var i = 0; i < bin.length; i++) {
+        pct += '%' + ('00' + bin.charCodeAt(i).toString(16)).slice(-2);
+      }
+      var text;
+      try { text = decodeURIComponent(pct); } catch (e) { text = bin; }
+      return JSON.parse(text);
+    } catch (e) {
+      return null;
+    }
+  }
+
   function readInfo() {
     var info = { test: '', tail: '', note: '' };
     // 1) URL 优先
     var c = new URLSearchParams(location.search).get('c');
     if (c) {
       info.tail = String(c).replace(/-/g, '').slice(-4).toUpperCase();
-      try {
-        var d = JSON.parse(atob(getCookie('gate_display').replace(/-/g, '+').replace(/_/g, '/')));
-        if (d) { info.note = d.note || ''; info.test = d.test || ''; }
-      } catch (e) {}
+      var dUrl = decodeDisplay(getCookie('gate_display'));
+      if (dUrl) { info.note = dUrl.note || ''; info.test = dUrl.test || ''; }
       return info;
     }
     // 2) Cookie
-    try {
-      var raw = getCookie('gate_display');
-      if (raw) {
-        var d2 = JSON.parse(atob(raw.replace(/-/g, '+').replace(/_/g, '/')));
-        if (d2) { info.tail = d2.tail || ''; info.note = d2.note || ''; info.test = d2.test || ''; }
-      }
-    } catch (e) {}
+    var d2 = decodeDisplay(getCookie('gate_display'));
+    if (d2) { info.tail = d2.tail || ''; info.note = d2.note || ''; info.test = d2.test || ''; }
     return info;
   }
 
+  // 是否从授权入口进来？
+  // ⚠️ gate_token 是 HttpOnly 的，JS 读不到（故意如此，防止被脚本偷走）。
+  //    之前这里只看 gate_token，于是「从授权页自动跳进测评页」这条路径
+  //    （URL 上不带 ?c=，授权页用 location.replace 进来的）永远判定为没门禁，
+  //    从而误弹「请从授权码入口进入」。
+  //    改看 gate_display：它和 gate_token 在同一个响应里一起下发、不带 HttpOnly，
+  //    正好可以作为「已授权」的标记。
   function hasGate() {
-    return !!getCookie('gate_token') || !!new URLSearchParams(location.search).get('c');
+    return !!getCookie('gate_display') ||
+      !!getCookie('gate_token') ||
+      !!new URLSearchParams(location.search).get('c');
   }
 
   function mountWatermark(info) {

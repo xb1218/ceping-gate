@@ -71,7 +71,10 @@
     border-radius: 13px; cursor: pointer; transition: border-color .15s, background .15s;
     font: inherit; color: inherit;
   }
-  .test:hover { border-color: var(--purple); background: #fff; }
+  /* 只在支持悬停的设备（鼠标）上给 hover 底色，手机上不生效 */
+  @media (hover: hover) {
+    .test:hover { border-color: var(--purple); background: #fff; }
+  }
   .test:active { transform: scale(.99); }
   .test .ic {
     width: 38px; height: 38px; border-radius: 11px; flex-shrink: 0;
@@ -157,6 +160,9 @@
   var params = new URLSearchParams(location.search);
   var presetCode = (params.get('code') || '').toUpperCase().replace(/\s/g, '');
   var presetTest = params.get('test') || '';
+  // 通用码的兑换链接带的是 test=*，含义是"由用户自己挑测试"。
+  // 归一成空串，走「下一步 → 选测试」流程；否则拿 '*' 去校验会报「测试不存在」。
+  if (presetTest === '*') presetTest = '';
   var presetErr = params.get('err') || '';
 
   // ---- 错误文案表 ----
@@ -226,6 +232,19 @@
     $(step).classList.remove('hidden');
   }
 
+  // ---- 进入测评页 ----
+  // 用 location.replace 而不是 href：把授权页本身从浏览历史里替换掉，
+  // 买家按返回键就不会再回到授权页、也就不会卡在「已被使用」。
+  var lastRedirect = '';
+  function enter(url, delay) {
+    lastRedirect = url;
+    setTimeout(function () { location.replace(url); }, delay || 0);
+  }
+  // 浏览器按返回时页面可能从 bfcache 直接恢复（脚本不会重跑），这里补跳一次
+  window.addEventListener('pageshow', function (e) {
+    if (e.persisted && lastRedirect) location.replace(lastRedirect);
+  });
+
   // ---- 校验 ----
   function verify(code, testId) {
     nextBtn.innerHTML = '<span class="spinner"></span>验证中';
@@ -238,11 +257,12 @@
       .then(function (r) { return r.json(); })
       .then(function (d) {
         if (d && d.ok) {
-          $('okTitle').textContent = '验证通过';
-          $('okSub').textContent = '正在进入「' + d.testName + '」…';
-          $('okNote').textContent = d.note ? ('欢迎回来，' + d.note) : '';
+          // d.reentry = 同一个浏览器重复进入（返回上一页 / 重开链接），服务端不再扣次数
+          $('okTitle').textContent = d.reentry ? '欢迎回来' : '验证通过';
+          $('okSub').textContent = (d.reentry ? '正在回到「' : '正在进入「') + d.testName + '」…';
+          $('okNote').textContent = d.note ? ('授权备注：' + d.note) : '';
           goto('step3');
-          setTimeout(function () { location.href = d.redirect; }, 550);
+          enter(d.redirect, d.reentry ? 250 : 550);
           return;
         }
         var text = (d && d.message) || ERRORS[d && d.reason] || '验证失败，请稍后重试。';
