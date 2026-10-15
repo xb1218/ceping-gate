@@ -41,12 +41,14 @@ PORT=9000 node server.js      # 换端口
 | `/admin` | 管理后台。批量生成码、看状态、作废、复制 |
 | `/tests/<id>.html` | 测评页本体。**没有有效 Cookie 打不开**，会被弹回壳页 |
 
-**自动发货用的两种链接形式**（阿奇索里填任一种）：
+**自动发货用的两种链接形式**（手动模式 / 理解原理时用）：
 
 ```
 http://你的域名/go?code=LA-A3K9-QM4X&test=lianai      # 推荐，短、可读
 http://你的域名/tests/lianai.html?c=LA-A3K9-QM4X      # 直达，效果相同
 ```
+
+> 推荐用**接口发货**：让发货工具下单后调 `POST /api/issue` 现场生成码并直接拿到上面的兑换直链，无需手工备码池。详见第五节。
 
 ---
 
@@ -92,9 +94,35 @@ http://你的域名/tests/lianai.html?c=LA-A3K9-QM4X      # 直达，效果相�
 | GET | `/api/admin/list?token=` | 全部码 + 统计 |
 | POST | `/api/admin/revoke` | 作废单个码 |
 | GET | `/api/admin/tests` | 全部测试（含未上架） |
+| POST | `/api/issue` | **下单后现场生成码**（接口发货用），body `{testId,note,maxUses}`，返回 `{code, redeemUrl}` |
 | GET | `/healthz` | 健康检查 |
 
 管理接口鉴权：请求头 `x-admin-token: <令牌>`，或 body / query 里带 `token`。
+`/api/issue` 鉴权：请求头 `x-issue-token: <令牌>`（默认复用 ADMIN_TOKEN，可用 `ISSUE_TOKEN` 环境变量单独覆盖）。**本机直连两者都免令牌**；公网访问必须带对应令牌。
+
+### 推荐：下单后现场生成（接口发货，零库存）
+
+不用预生成码池，也不会「码不够发不出货」。把自动发货工具（阿奇索等）配成**接口发货**模式，让它每笔订单付款后调用：
+
+```http
+POST https://你的域名/api/issue
+Content-Type: application/json
+x-issue-token: 你的签发令牌
+
+{ "testId": "lianai", "note": "订单号SH20261015-001" }
+```
+
+返回：
+
+```json
+{ "ok": true, "testId": "lianai", "count": 1,
+  "codes": [ { "code": "LIAN-R6JJ-MHY7",
+               "redeemUrl": "https://你的域名/tests/lianai.html?c=LIAN-R6JJ-MHY7" } ] }
+```
+
+把 `redeemUrl` 当成发货内容发出去即可——买家点一下直接进测试（零输入）。`testId` 固定填该商品对应的测试 id（见 `config/tests.json`）。通用码用 `testId: "*"`，此时返回 `/go?code=...&test=*` 短链（壳页自选测试）。
+
+> 仍想用「卡密池」模式也行：在 `/admin` 批量生成 → 复制 → 导入发货工具的卡密库。但 JIT 接口发货免库存、更省心，新项目建议直接用。
 
 ---
 

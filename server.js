@@ -87,6 +87,9 @@ function getAdminToken() {
   return t;
 }
 const ADMIN_TOKEN = getAdminToken();
+// 即时签发令牌：供自动发货工具（阿奇索接口发货）在下单后调用本服务现场生成码。
+// 默认复用 ADMIN_TOKEN；公网部署建议单独用 ISSUE_TOKEN 环境变量覆盖。
+const ISSUE_TOKEN = process.env.ISSUE_TOKEN || ADMIN_TOKEN;
 
 // ------------------------------------------------------------------
 // 数据层：授权码库（内存缓存 + 原子落盘）
@@ -354,6 +357,14 @@ function checkAdmin(req, body) {
   return (h && h === ADMIN_TOKEN) || (b && b === ADMIN_TOKEN);
 }
 
+// 即时签发校验：本机直连免令牌；公网需带 x-issue-token（= ISSUE_TOKEN）
+function checkIssue(req, body) {
+  if (isLocalRequest(req)) return true;
+  const h = req.headers['x-issue-token'] || '';
+  const b = body && body.token ? String(body.token) : '';
+  return (h && h === ISSUE_TOKEN) || (b && b === ISSUE_TOKEN);
+}
+
 async function handleAdminGenerate(req, res, body) {
   if (!checkAdmin(req, body)) return sendJson(res, 401, { ok: false, message: '管理令牌不正确' });
   const count = Math.min(500, Math.max(1, parseInt(body.count, 10) || 1));
@@ -386,6 +397,42 @@ async function handleAdminGenerate(req, res, body) {
   saveCodes();
   log(`生成 ${out.length} 个授权码 testId=${testId} maxUses=${maxUses}`);
   return sendJson(res, 200, { ok: true, codes: out });
+}
+
+// 即时签发：下单后由自动发货工具调用，现场生成一个（或多个）码并返回兑换短链。
+// 零库存：不依赖预生成码池，永不出现「码不够发不出货」。
+async function handleIssue(req, res, body) {
+  if (!checkIssue(req, body)) return sendJson(res, 401, { ok: false, message: '签发令牌不正确' });
+  const testId = String(body.testId || '*').trim();
+  if (testId !== '*' && !findTest(testId)) {
+    return sendJson(res, 400, { ok: false, message: '测试不存在' });
+  }
+  const count = Math.min(50, Math.max(1, parseInt(body.count, 10) || 1));
+  const maxUses = body.maxUses === 0 ? 0 : Math.max(1, parseInt(body.maxUses, 10) || 1);
+  const defPrefix = testId === '*' ? 'ALL' : (findTest(testId) ? findTest(testId).id.slice(0, 4).toUpperCase() : 'TEST');
+  const prefix = String(body.prefix || defPrefix).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8) || 'TEST';
+  const note = String(body.note || '').slice(0, 60);
+  const host = req.headers['x-forwarded-host'] || req.headers.host || `localhost:${PORT}`;
+  const proto = String(req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim() || 'https';
+
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const c = genCode(prefix);
+    codes[c] = {
+      code: c, testId, prefix, maxUses, usedCount: 0,
+      note, createdAt: new Date().toISOString(), firstUsedAt: null, lastUsedAt: null, revoked: false
+    };
+    // 指定测试：直接给「一键进测试」的直链（买家点一下即核销进入，零输入）
+    // 通用码(*)：给 /go 短链（壳页带码，让用户自选测试）
+    const direct = testId === '*'
+      ? `${proto}://${host}/go?code=${encodeURIComponent(c)}&test=*`
+      : `${proto}://${host}/tests/${encodeURIComponent(testId)}.html?c=${encodeURIComponent(c)}`;
+    out.push({ code: c, redeemUrl: direct });
+  }
+  dirty = true;
+  saveCodes();
+  log(`即时签发 ${out.length} 个 testId=${testId} note=${note || '-'}`);
+  return sendJson(res, 200, { ok: true, testId, count: out.length, codes: out });
 }
 
 function handleAdminList(req, res, url) {
@@ -467,6 +514,11 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/admin/generate' && req.method === 'POST') {
       const body = await readBody(req);
       return handleAdminGenerate(req, res, body);
+    }
+    // 即时签发（下单后由自动发货工具调用，现场生成码 + 返回兑换短链）
+    if (p === '/api/issue' && req.method === 'POST') {
+      const body = await readBody(req);
+      return handleIssue(req, res, body);
     }
     if (p === '/api/admin/list') return handleAdminList(req, res, url);
     if (p === '/api/admin/revoke' && req.method === 'POST') {
