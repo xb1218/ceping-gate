@@ -1,0 +1,14 @@
+{
+  "name": "ceping-gate",
+  "version": "1.0.0",
+  "private": true,
+  "description": "测评授权码门禁系统：壳页统一接管所有测评 HTML，服务端校验授权码并核销",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "gen": "node scripts/generate-codes.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

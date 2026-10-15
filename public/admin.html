@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>授权码管理后台</title>
+<style>
+  :root {
+    --ink: #2b2b33; --muted: #7c7c88; --line: #e6e4ec; --paper: #fff; --bg: #f6f5f9;
+    --purple: #6f5bb8; --purple-deep: #553f96; --ok: #1d9e75; --warn: #b8791a;
+    --err: #c9483d; --mono: "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.65 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 26px 20px 60px; }
+  header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 20px; }
+  h1 { font-size: 19px; font-weight: 600; margin: 0; }
+  header .tag { font-size: 12px; color: var(--muted); }
+  .card { background: var(--paper); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; margin-bottom: 16px; }
+  .card h2 { font-size: 13px; font-weight: 600; margin: 0 0 14px; color: var(--muted); letter-spacing: .04em; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+  .f { display: flex; flex-direction: column; gap: 5px; }
+  .f label { font-size: 11.5px; color: var(--muted); font-weight: 600; letter-spacing: .03em; }
+  input, select { font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px;
+    background: #fbfbfd; color: var(--ink); outline: none; min-width: 0; }
+  input:focus, select:focus { border-color: var(--purple); background: #fff; }
+  input.mono { font-family: var(--mono); letter-spacing: .06em; }
+  button { font: inherit; font-weight: 600; padding: 9px 15px; border: 0; border-radius: 9px;
+    background: var(--purple); color: #fff; cursor: pointer; }
+  button:hover { background: var(--purple-deep); }
+  button.ghost { background: #efeaf8; color: var(--purple-deep); }
+  button.mini { padding: 4px 9px; font-size: 12px; font-weight: 500; border-radius: 7px; }
+  button.mini.danger { background: #fbeceb; color: var(--err); }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; margin-bottom: 16px; }
+  .stat { background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 13px 15px; }
+  .stat b { display: block; font-size: 22px; font-weight: 600; line-height: 1.2; }
+  .stat span { font-size: 11.5px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-size: 11.5px; font-weight: 600; color: var(--muted);
+    padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td { padding: 9px 10px; border-bottom: 1px solid #f0eef4; vertical-align: middle; }
+  tr:hover td { background: #faf9fc; }
+  .code { font-family: var(--mono); font-size: 12.5px; letter-spacing: .04em; white-space: nowrap; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .b-unused { background: #eaf7f1; color: #12684d; }
+  .b-active { background: #fdf3e3; color: #8a5a10; }
+  .b-exhausted { background: #eef0f4; color: #5c5c68; }
+  .b-revoked { background: #fbeceb; color: #a5342a; }
+  .out { font-family: var(--mono); font-size: 12.5px; background: #f6f4fb; border: 1px dashed var(--line);
+    border-radius: 10px; padding: 12px; margin-top: 12px; white-space: pre-wrap; word-break: break-all;
+    max-height: 190px; overflow: auto; }
+  .note { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.7; }
+  .guide { border-color: #d9cff0; background: #fbf9ff; }
+  .guide h2 { color: var(--purple-deep); }
+  .steps { margin: 0; padding-left: 20px; }
+  .steps li { margin: 7px 0; line-height: 1.7; }
+  .steps code { background: #efeaf8; padding: 1px 6px; border-radius: 5px; font-family: var(--mono); font-size: 12px; color: var(--purple-deep); }
+  .hidden { display: none !important; }
+  .empty { padding: 26px; text-align: center; color: var(--muted); font-size: 13px; }
+  .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+  .bar .sp { flex: 1; }
+  #toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+    background: #2b2b33; color: #fff; font-size: 13px; padding: 9px 16px; border-radius: 999px;
+    opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 99; }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>授权码管理后台</h1>
+  <span class="tag">生成 / 查看 / 作废 · 数据保存在本地 data/codes.json</span>
+</header>
+
+<!-- 使用说明 -->
+<div class="card guide">
+  <h2>使用说明（先看这个）</h2>
+  <ol class="steps">
+    <li><b>双击</b>项目里的 <code>一键启动.command</code> 启动服务，浏览器会自动打开本页。</li>
+    <li><b>本机打开免令牌</b>：直接就能看到下面面板并生成授权码。只有把系统部署到公网（别人能访问你的网址）时才需要令牌。</li>
+    <li><b>生成授权码</b>：在「批量生成授权码」里选测试、填数量，点生成。一次性码（默认）谁先打开谁用掉，转发第二人提示「已被使用」。</li>
+    <li><b>把码发给买家</b>：点「复制全部未使用」，把那串码发给买你测试的人（每行一个）。</li>
+    <li><b>买家怎么用</b>：买家打开 <code>http://你的网址/</code> 入口页 → 粘贴授权码 → 自动跳转到对应测试。或直接发 <code>/go?code=码&amp;test=lianai</code> 短链。</li>
+    <li><b>查看 / 作废</b>：在「授权码列表」里能看到每个码的状态（未使用/已核销/已作废），异常可点「作废」。</li>
+  </ol>
+  <p class="note" style="margin-top:10px">
+    完整流程见 <code>README.md</code>。想自己跑命令生成码见 <code>scripts/generate-codes.js</code>。
+  </p>
+</div>
+
+<!-- 令牌 -->
+<div class="card" id="tokenCard">
+  <h2>管理令牌（公网部署才需要）</h2>
+  <div class="row">
+    <div class="f" style="flex:1;min-width:260px">
+      <label for="token">ADMIN TOKEN（本机访问可留空）</label>
+      <input id="token" class="mono" type="text" placeholder="公网访问时粘贴令牌" autocomplete="off" />
+    </div>
+    <button id="saveToken" class="ghost">解锁</button>
+  </div>
+  <p class="note">令牌只保存在这台浏览器的 localStorage，不上传。公网部署时，令牌在启动终端打印，删掉 data/admin.token 重启可重新生成。</p>
+</div>
+
+<div id="panel" class="hidden">
+
+  <div class="stats" id="stats"></div>
+
+  <!-- 生成 -->
+  <div class="card">
+    <h2>批量生成授权码</h2>
+    <div class="row">
+      <div class="f"><label for="gPrefix">前缀</label>
+        <input id="gPrefix" type="text" value="LA" maxlength="8" style="width:88px" /></div>
+      <div class="f"><label for="gCount">数量</label>
+        <input id="gCount" type="number" value="20" min="1" max="500" style="width:88px" /></div>
+      <div class="f"><label for="gTest">适用测试</label>
+        <select id="gTest" style="min-width:180px"></select></div>
+      <div class="f"><label for="gUses">可用次数</label>
+        <select id="gUses" style="width:120px">
+          <option value="1" selected>1 次（一次性）</option>
+          <option value="0">不限（演示用）</option>
+          <option value="3">3 次</option>
+        </select></div>
+      <div class="f" style="flex:1;min-width:160px"><label for="gNote">备注（水印显示，如买家昵称/订单号）</label>
+        <input id="gNote" type="text" placeholder="选填，最多 60 字" maxlength="60" /></div>
+      <button id="gen">生成</button>
+    </div>
+    <div id="genOut" class="out hidden"></div>
+    <div class="bar" style="margin-top:12px;margin-bottom:0">
+      <button id="copyAll" class="ghost hidden">复制全部未使用</button>
+      <span class="note" style="margin:0">一次性码是默认选项：第一个打开的人用掉，转发第二个人会提示「已被使用」。</span>
+    </div>
+  </div>
+
+  <!-- 列表 -->
+  <div class="card">
+    <h2>授权码列表</h2>
+    <div class="bar">
+      <div class="f"><label for="fTest">筛选</label>
+        <select id="fTest" style="min-width:180px"></select></div>
+      <span class="sp"></span>
+      <button id="refresh" class="ghost mini">刷新</button>
+    </div>
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr>
+          <th>授权码</th><th>适用测试</th><th>次数</th><th>已用</th><th>状态</th><th>备注</th><th>首次使用</th><th>操作</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <div id="empty" class="empty hidden">还没有授权码，先在上面生成一批。</div>
+  </div>
+
+</div>
+
+<div id="locked" class="card hidden">
+  <p class="note" style="margin:0">本机访问本应自动解锁。若你是在<strong>公网网址</strong>下打开本页，请在上方的「管理令牌」里粘贴令牌后点解锁；令牌在启动服务的终端里打印。</p>
+</div>
+
+</div>
+<div id="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var TOKEN_KEY = 'gate_admin_token';
+  var token = localStorage.getItem(TOKEN_KEY) || '';
+  var tests = [];
+  var rows = [];
+
+  function toast(t) {
+    var el = $('toast'); el.textContent = t; el.classList.add('show');
+    clearTimeout(el._t); el._t = setTimeout(function () { el.classList.remove('show'); }, 1600);
+  }
+  function copy(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { toast('已复制'); });
+    } else {
+      var ta = document.createElement('textarea');
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); toast('已复制'); } catch (e) { toast('复制失败'); }
+      document.body.removeChild(ta);
+    }
+  }
+  function api(url, opts) {
+    opts = opts || {};
+    opts.headers = Object.assign({ 'x-admin-token': token }, opts.headers || {});
+    return fetch(url, opts).then(function (r) {
+      return r.json().then(function (d) {
+        if (r.status === 401) { lock(); throw new Error('令牌不正确'); }
+        if (!d.ok && d.message) throw new Error(d.message);
+        return d;
+      });
+    });
+  }
+
+  function lock() {
+    $('panel').classList.add('hidden');
+    $('locked').classList.remove('hidden');
+  }
+  function unlock() {
+    $('panel').classList.remove('hidden');
+    $('locked').classList.add('hidden');
+    $('tokenCard').classList.add('hidden');
+    refresh();
+  }
+  function tryUnlock() {
+    api('/api/admin/list').then(function (d) {
+      if (d && d.ok) { unlock(); loadTestList(); }
+      else { lock(); }
+    }).catch(function () { lock(); });
+  }
+
+  function fillTestSelects() {
+    var opts = '<option value="*">通用（任选测试）</option>';
+    tests.forEach(function (t) {
+      opts += '<option value="' + t.id + '">' + t.name + (t.status === 'online' ? '' : '（未上架）') + '</option>';
+    });
+    $('gTest').innerHTML = opts;
+    $('fTest').innerHTML = '<option value="">全部测试</option>' + opts;
+  }
+
+  function statusBadge(s) {
+    var map = { unused: ['b-unused', '未使用'], active: ['b-active', '使用中'],
+      exhausted: ['b-exhausted', '已核销'], revoked: ['b-revoked', '已作废'], missing: ['b-revoked', '不存在'] };
+    var m = map[s] || ['b-exhausted', s];
+    return '<span class="badge ' + m[0] + '">' + m[1] + '</span>';
+  }
+
+  function renderStats(st) {
+    $('stats').innerHTML =
+      stat(st.total, '总码数') + stat(st.unused, '未使用') + stat(st.active, '使用中') +
+      stat(st.exhausted, '已核销') + stat(st.revoked, '已作废');
+    function stat(n, label) {
+      return '<div class="stat"><b>' + n + '</b><span>' + label + '</span></div>';
+    }
+  }
+
+  function renderRows() {
+    var tb = $('rows');
+    tb.innerHTML = '';
+    $('empty').classList.toggle('hidden', rows.length > 0);
+    rows.forEach(function (r) {
+      var tr = document.createElement('tr');
+      var t = tests.filter(function (x) { return x.id === r.testId; })[0];
+      var tname = r.testId === '*' ? '通用' : (t ? t.name : r.testId);
+      tr.innerHTML =
+        '<td class="code">' + r.code + '</td>' +
+        '<td>' + tname + '</td>' +
+        '<td>' + (r.maxUses === 0 ? '不限' : r.maxUses) + '</td>' +
+        '<td>' + r.usedCount + '</td>' +
+        '<td>' + statusBadge(r.status) + '</td>' +
+        '<td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + (r.note || '') + '">' + (r.note || '—') + '</td>' +
+        '<td style="font-size:12px;color:var(--muted)">' + (r.firstUsedAt ? String(r.firstUsedAt).slice(0, 10) : '—') + '</td>' +
+        '<td style="white-space:nowrap"></td>';
+      var ops = tr.lastChild;
+      var c = document.createElement('button');
+      c.className = 'mini ghost'; c.textContent = '复制';
+      c.onclick = function () { copy(r.code); };
+      ops.appendChild(c);
+      if (r.status !== 'revoked' && r.status !== 'exhausted') {
+        var d = document.createElement('button');
+        d.className = 'mini danger'; d.textContent = '作废'; d.style.marginLeft = '6px';
+        d.onclick = function () {
+          if (!confirm('确定作废 ' + r.code + ' ？')) return;
+          api('/api/admin/revoke', { method: 'POST', body: JSON.stringify({ code: r.code }) })
+            .then(function () { toast('已作废'); refresh(); })
+            .catch(function (e) { toast(e.message); });
+        };
+        ops.appendChild(d);
+      }
+      tb.appendChild(tr);
+    });
+    var unused = rows.filter(function (r) { return r.status === 'unused'; }).map(function (r) { return r.code; });
+    $('copyAll').classList.toggle('hidden', unused.length === 0);
+    $('copyAll').onclick = function () { copy(unused.join('\n')); };
+  }
+
+  function refresh() {
+    api('/api/admin/list').then(function (d) {
+      rows = d.rows || [];
+      renderStats(d.stats);
+      renderRows();
+    }).catch(function (e) { toast(e.message); });
+  }
+
+  // 初始化：打开即探测，本机直连或令牌正确都自动解锁
+  $('token').value = token;
+  tryUnlock();
+
+  $('refresh').onclick = refresh;
+
+  $('gen').onclick = function () {
+    var body = {
+      prefix: $('gPrefix').value.trim() || 'TEST',
+      count: parseInt($('gCount').value, 10) || 1,
+      testId: $('gTest').value,
+      maxUses: $('gUses').value === '0' ? 0 : parseInt($('gUses').value, 10) || 1,
+      note: $('gNote').value.trim()
+    };
+    api('/api/admin/generate', { method: 'POST', body: JSON.stringify(body) })
+      .then(function (d) {
+        var out = $('genOut');
+        out.textContent = d.codes.join('\n');
+        out.classList.remove('hidden');
+        toast('已生成 ' + d.codes.length + ' 个');
+        refresh();
+      })
+      .catch(function (e) { toast(e.message); });
+  };
+
+  // 测试清单（优先取管理接口，能看到未上架的）
+  function loadTestList() {
+    return api('/api/admin/tests').catch(function () {
+      return fetch('/api/config').then(function (r) { return r.json(); });
+    }).then(function (d) {
+      tests = (d && d.tests) || [];
+      fillTestSelects();
+    });
+  }
+  if (token) loadTestList();
+  $('saveToken').onclick = function () {
+    token = $('token').value.trim();
+    localStorage.setItem(TOKEN_KEY, token);
+    tryUnlock();
+  };
+})();
+</script>
+</body>
+</html>

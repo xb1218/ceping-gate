@@ -1,0 +1,22 @@
+{
+  "tests": [
+    {
+      "id": "lianai",
+      "name": "恋爱模式观察站",
+      "subtitle": "你的心动，几级上头？",
+      "file": "lianai.html",
+      "price": 2.99,
+      "status": "online",
+      "cover": "恋爱脑观察室 · 12 道题测出你的上头模式"
+    },
+    {
+      "id": "xinli",
+      "name": "心理年龄",
+      "subtitle": "你的心理年龄是几岁？",
+      "file": "xinli.html",
+      "price": 1.99,
+      "status": "offline",
+      "cover": "8 道题，5 档年龄结果"
+    }
+  ]
+}
